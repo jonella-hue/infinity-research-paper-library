@@ -479,8 +479,9 @@ async function runSearch(reset) {
   out.sort(cmp);
   state.results = out; if (reset !== false) state.shown = state.page;
   if (reset) setHash();
+  state.verifying = 0;
   await showPage(token);
-  if (out.some(r => r.verify)) verifyAll(token);
+  if (out.some(r => r.verify)) verifyAll(token); else { state.verifying = 0; renderResults(); }
 }
 // phrase check against the actual words of a paper (text, title, authors or abstract as the search scope allows)
 async function verifies(r) {
@@ -509,6 +510,7 @@ async function verifies(r) {
   return true;
 }
 async function showPage(token) {
+  if (state.results.some(r => r.verify && r.ok === undefined)) state.verifying = state.results.filter(r => r.verify && r.ok === undefined).length;
   renderResults();
   const vis = state.results.slice(0, state.shown);
   await pool(vis, 8, async r => {
@@ -524,13 +526,15 @@ async function showPage(token) {
 async function verifyAll(token) {
   const todo = state.results.filter(r => r.verify && r.ok === undefined);
   state.verifying = todo.length;
-  for (let i = 0; i < todo.length; i += 24) {
-    await pool(todo.slice(i, i + 24), 8, async r => { r.ok = await verifies(r); });
+  renderResults();
+  for (let i = 0; i < todo.length; i += 48) {
+    await pool(todo.slice(i, i + 48), 24, async r => { r.ok = await verifies(r); });
     if (token !== state.token) return;
-    state.verifying = todo.length - Math.min(todo.length, i + 24);
+    state.verifying = todo.length - Math.min(todo.length, i + 48);
     state.results = state.results.filter(r => r.ok !== false);
     renderResults();
   }
+  state.verifying = 0; renderResults();
 }
 function snippetsFor(p, n = 2) {
   const src = cachedText(p);
@@ -567,7 +571,7 @@ function renderResults() {
   const r = state.results, list = $("#list");
   const q = $("#q").value.trim();
   const checking = state.verifying ? ` · confirming exact phrases, ${state.verifying.toLocaleString()} left` : "";
-  $("#count").innerHTML = `<b>${r.length.toLocaleString()}</b> publication${r.length === 1 ? "" : "s"}${q ? " match" : ""}${checking}${state.note ? ` · <span>${state.note}</span>` : ""}`;
+  $("#count").innerHTML = `${state.verifying ? "Up to " : ""}<b>${r.length.toLocaleString()}</b> publication${r.length === 1 ? "" : "s"}${q ? " match" : ""}${checking}${state.note ? ` · <span>${state.note}</span>` : ""}`;
   if (!r.length) { list.innerHTML = `<div class="empty">No publications match. Try fewer words, OR, or a prefix like <code>optimiz*</code>.</div>`; $("#showmore").hidden = true; return; }
   list.innerHTML = r.slice(0, state.shown).map(({ p, hits, absOnly }) => {
     const who = p.candidates.map(id => { const c = LIB.candById[id]; return `<span class="who"><a data-cand="${esc(id)}">${esc(c?.name || id)}</a> · ${esc(c?.university || "")}</span>`; }).join(" ");
