@@ -6,7 +6,7 @@
 <title>Infinity Research Paper Library</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <meta name="robots" content="noindex, nofollow">
-<meta name="description" content="Private full-text library of research papers by Infinity university candidates. Loads only its own data files.">
+<meta name="description" content="Private full-text library of research papers by Infinity university candidates. Loads only its own data files, on demand.">
 <style>
 :root {
   --bg: #161718; --bar: #1c1d1f; --surface: #1d1e20; --sunk: #26282b; --ink: #e8e9eb; --muted: #a3a7ad; --line: #34363a;
@@ -231,116 +231,111 @@ table.grid tr.clk:hover td { background: var(--accent-soft); }
 
 <script>
 "use strict";
+// Infinity Research Paper Library: on-demand search (data format 2, see tools/site_data.py).
+// On open it loads the people list and one compact row per paper. Word-index files, paper texts and paper
+// details are fetched only when a search or a paper needs them.
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-// LOCAL: page opened from disk or a local server, where the Publications/ .md files sit next to it.
-// HIST: page is the top-level window (disk, localhost, GitHub Pages), so #q= / #pub= links and back/forward work.
 const LOCAL = location.protocol === "file:" || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
 let HIST = false; try { HIST = window.top === window; } catch (e) {}
-const LIB = { index: null, cands: [], pubs: [], recs: [], text: {}, loaded: 0 };
-const state = { results: [], shown: 0, terms: [], page: 30 };
+const STATUS = ["Complete", "Partial", "Unavailable", "Duplicate"];
+const ATT = { C: "Confirmed: candidate's OpenAlex author ID is on this work", N: "Name match in author list (different OpenAlex author ID)",
+  M: "Possible misattribution: candidate's name not in the work's author list", S: "From candidate's Google Scholar profile", "?": "Not checked" };
+const STOP = new Set(`a an and are as at be been but by can for from had has have he her his i if in into is it its may
+more not of on or our over she so such than that the their them then there these they this those to under up
+us was we were what when where which while who will with within would you your also using use used based between
+both each other only some`.split(/\s+/));
+const LIB = { index: null, cands: [], pubs: [], byNum: new Map(), recs: [], text: new Map(), detail: new Map(), shard: new Map(), dec: new Map() };
+const state = { results: [], shown: 0, terms: [], page: 30, token: 0, note: "" };
+const pid = n => "P" + String(n).padStart(4, "0");
 
-// ---------- loading (fetch when served over http, script tags when opened from disk)
-function loadScript(src) { return new Promise((ok, bad) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = () => bad(new Error("missing " + src)); document.head.appendChild(s); }); }
-async function getData(name, jsonPath) {
-  if (location.protocol !== "file:") {
-    try { const r = await fetch(jsonPath); if (r.ok) return await r.json(); } catch (e) {}
+// ---------- loading
+async function getJSON(path) {
+  let err;
+  for (let i = 0; i < 4; i++) {  // retry: a busy server can drop a few of many parallel requests
+    try { const r = await fetch(path); if (r.ok) return await r.json(); err = new Error(`${path}: HTTP ${r.status}`); if (r.status === 404) break; }
+    catch (e) { err = e; }
+    await new Promise(res => setTimeout(res, 300 * (i + 1)));
   }
-  await loadScript("data/js/" + name + ".js");
-  return window.__LIB[name];
+  throw err;
 }
 async function boot() {
+  if (location.protocol === "file:") {
+    $("#list").innerHTML = `<div class="empty">This page needs to be opened through a web address. Double-click <b>Open Library.command</b> in this folder, or use the GitHub Pages link.</div>`;
+    $("#totals").textContent = ""; return;
+  }
   try {
-    LIB.index = await getData("index", "data/index.json");
-    LIB.cands = await getData("candidates", "data/candidates.json");
-    const p = await getData("publications", "data/publications.json");
-    LIB.pubs = p.publications; LIB.recs = p.records;
+    LIB.index = await getJSON("data/index.json");
+    const [cands, ...lists] = await Promise.all([getJSON("data/candidates.json"),
+      ...LIB.index.pub_lists.map(n => getJSON(`data/list/${n}.json`))]);
+    LIB.cands = cands;
+    const topics = LIB.index.topics;
+    for (const rows of lists) for (const r of rows) {
+      const p = { num: r[0], id: pid(r[0]), title: r[1], year: r[2], venue: r[3], type: r[4], status: STATUS[r[5]], words: r[6], pages: r[7],
+        topics: r[8].map(i => topics[i]), topics_possible: r[9].map(i => topics[i]), candidates: r[10].map(i => cands[i].id),
+        has_fulltext: !!r[11], _review: !!r[12], has_abstract: !!r[13] };
+      LIB.pubs.push(p); LIB.byNum.set(p.num, p);
+    }
+    const recLists = await Promise.all(LIB.index.rec_lists.map(n => getJSON(`data/list/${n}.json`)));
+    for (const rows of recLists) for (const r of rows) LIB.recs.push({ record_key: r[0], cid: cands[r[1]]?.id, name: cands[r[1]]?.name,
+      university: cands[r[1]]?.university, pid: pid(r[2]), num: r[2], status: STATUS[r[3]], att: r[4], review: r[4].endsWith("!") || r[4] === "M" });
   } catch (e) {
-    $("#list").innerHTML = `<div class="empty">Could not load the library data (${esc(e.message)}). Keep index.html next to the <code>data</code> folder.</div>`;
-    return;
+    $("#list").innerHTML = `<div class="empty">Could not load the library data (${esc(e.message)}).</div>`; return;
   }
-  LIB.pubById = Object.fromEntries(LIB.pubs.map(p => [p.id, p]));
   LIB.candById = Object.fromEntries(LIB.cands.map(c => [c.id, c]));
-  LIB.recsByPub = {}; for (const r of LIB.recs) (LIB.recsByPub[r.pid] ||= []).push(r);
-  for (const p of LIB.pubs) {
-    p._authors = (p.authors || []).join("; ");
-    p._cnames = p.candidates.map(id => LIB.candById[id]?.name || id);
-    p._review = (LIB.recsByPub[p.id] || []).some(r => r.review);
-  }
+  LIB.recsByPid = {}; for (const r of LIB.recs) (LIB.recsByPid[r.pid] ||= []).push(r);
   fillFilters(); renderAbout(); renderCands();
   const c = LIB.index.counts;
-  $("#totals").textContent = `${c.candidates} candidates · ${c.records.toLocaleString()} records · ${c.publications.toLocaleString()} publications · ${c.fulltext.toLocaleString()} with full text`;
+  $("#totals").textContent = `${c.candidates.toLocaleString()} candidates · ${c.records.toLocaleString()} records · ${c.publications.toLocaleString()} publications · ${c.fulltext.toLocaleString()} with full text`;
+  $(".loadbar").hidden = true;
   applyHash();
-  const shards = LIB.index.shards;
-  for (let i = 0; i < shards.length; i++) {
-    try { const d = await getData(shards[i], `data/full_text/${shards[i]}.json`); Object.assign(LIB.text, d.docs); if (window.__LIB) delete window.__LIB[shards[i]]; } catch (e) { console.warn(e); }
-    LIB.loaded = i + 1; $("#loadbar").style.width = (100 * (i + 1) / shards.length) + "%";
-    if ((i + 1) % 4 === 0 || i === shards.length - 1) runSearch(false);
-  }
-  setTimeout(() => $(".loadbar").hidden = true, 600);
 }
+async function loadText(p) {  // "" = no full text; null = could not be loaded right now
+  if (!p.has_fulltext) return "";
+  if (LIB.text.has(p.id)) return LIB.text.get(p.id);
+  const t = getJSON(`data/text/${p.id}.json`).then(d => d.t).catch(() => null);
+  LIB.text.set(p.id, t);
+  const v = await t;
+  if (v === null) { LIB.text.delete(p.id); return null; }
+  LIB.text.set(p.id, v);
+  if (LIB.text.size > 1500) LIB.text.delete(LIB.text.keys().next().value);  // keep memory bounded
+  return v;
+}
+function cachedText(p) { const v = LIB.text.get(p.id); return typeof v === "string" ? v : ""; }
+async function loadDetail(p) {
+  const b = Math.floor((p.num - 1) / LIB.index.block) + 1;
+  if (!LIB.detail.has(b)) LIB.detail.set(b, getJSON(`data/detail/block-${String(b).padStart(4, "0")}.json`).catch(() => ({})));
+  return (await LIB.detail.get(b))[p.id] || {};
+}
+async function loadShard(k) {
+  if (!LIB.index.search_shards.includes(k)) return {};
+  if (!LIB.shard.has(k)) LIB.shard.set(k, getJSON(`data/search/${k}.json`).catch(() => ({})));
+  return LIB.shard.get(k);
+}
+async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) await fn(items[i++]); })); }
 
 // ---------- filters
 function opt(sel, vals) { const el = $(sel); for (const [v, t] of vals) { const o = document.createElement("option"); o.value = v; o.textContent = t; el.appendChild(o); } }
 function fillFilters() {
-  const unis = [...new Set(LIB.cands.map(c => c.university))];
-  opt("#f-uni", unis.map(u => [u, u]));
+  opt("#f-uni", [...new Set(LIB.cands.map(c => c.university))].map(u => [u, u]));
   opt("#f-cand", [...LIB.cands].sort((a, b) => a.name.localeCompare(b.name)).map(c => [c.id, `${c.name} (${c.university.replace(" University", "")})`]));
   const years = [...new Set(LIB.pubs.map(p => +p.year).filter(Boolean))].sort((a, b) => b - a);
   opt("#f-y1", years.map(y => [y, y])); opt("#f-y2", years.map(y => [y, y]));
   const types = {}; LIB.pubs.forEach(p => { if (p.type) types[p.type] = (types[p.type] || 0) + 1; });
   opt("#f-type", Object.entries(types).sort((a, b) => b[1] - a[1]).map(([t, n]) => [t, `${t} (${n})`]));
   const venues = {}; LIB.pubs.forEach(p => { if (p.venue) venues[p.venue] = (venues[p.venue] || 0) + 1; });
-  $("#venues").innerHTML = Object.entries(venues).sort((a, b) => b[1] - a[1]).map(([v]) => `<option value="${esc(v)}">`).join("");
-  const tc = {}; LIB.pubs.forEach(p => (p.topics || []).forEach(t => tc[t] = (tc[t] || 0) + 1));
-  opt("#f-topic", LIB.index.topics.filter(t => tc[t]).map(t => [t, `${t} (${tc[t]})`]));
+  $("#venues").innerHTML = Object.entries(venues).sort((a, b) => b[1] - a[1]).slice(0, 3000).map(([v]) => `<option value="${esc(v)}">`).join("");
+  const tc = {}; LIB.pubs.forEach(p => p.topics.forEach(t => tc[t] = (tc[t] || 0) + 1));
+  opt("#f-topic", LIB.index.topics.filter(t => tc[t]).map(t => [t, `${t} (${tc[t].toLocaleString()})`]));
   opt("#f-topic", [["__possible", "Possible topic only (needs review)"], ["__none", "No topic assigned"]]);
   const ex = ["GPU optimization", "distributed inference", '"large language models"', "CUDA AND memory optimization", "transformer OR inference",
     "hardware acceleration", "kernel optimization", '"memory bandwidth"', "quantization", "compiler optimization"];
   $("#examples").insertAdjacentHTML("beforeend", ex.map(e => `<button type="button">${esc(e)}</button>`).join(""));
   $("#examples").addEventListener("click", e => { if (e.target.tagName === "BUTTON") { $("#q").value = e.target.textContent; runSearch(true); } });
-  for (const id of ["#f-uni", "#f-cand", "#f-y1", "#f-y2", "#f-type", "#f-topic", "#f-ft", "#f-status", "#f-scope", "#f-abs", "#f-rev", "#sort"])
+  for (const id of ["#f-uni", "#f-cand", "#f-y1", "#f-y2", "#f-type", "#f-topic", "#f-ft", "#f-status", "#f-scope", "#f-abs", "#f-rev", "#sort", "#f-venue"])
     $(id).addEventListener("change", () => runSearch(true));
-  $("#f-venue").addEventListener("change", () => runSearch(true));
   $("#resetf").addEventListener("click", () => { document.querySelectorAll("#filters select").forEach(s => s.selectedIndex = 0); $("#f-venue").value = ""; $("#f-abs").checked = false; $("#f-rev").checked = false; runSearch(true); });
 }
-
-// ---------- query parsing
-// grammar: groups separated by OR; inside a group, terms are ANDed. Terms: "phrase", word, prefix*, -word / NOT word, title:x, author:x
-function parseQuery(q) {
-  const toks = []; const re = /(-|NOT\s+)?(?:(title|author|authors|text):)?("([^"]*)"|(\S+))/g; let m;
-  while ((m = re.exec(q))) {
-    const raw = m[4] ?? m[5];
-    if (!m[1] && !m[2] && m[4] === undefined && (raw === "AND" || raw === "OR")) { toks.push({ op: raw }); continue; }
-    if (!raw || !raw.trim()) continue;
-    toks.push({ neg: !!m[1], field: (m[2] || "").replace("authors", "author"), phrase: m[4] !== undefined, raw });
-  }
-  const groups = [[]], neg = [];
-  for (const t of toks) {
-    if (t.op === "OR") { if (groups[groups.length - 1].length) groups.push([]); continue; }
-    if (t.op === "AND") continue;
-    t.rx = termRx(t); if (!t.rx) continue;
-    (t.neg ? neg : groups[groups.length - 1]).push(t);
-  }
-  return { groups: groups.filter(g => g.length), neg };
-}
-function rxEsc(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-function termRx(t) {
-  let s = t.raw.trim(); if (!s) return null;
-  let body;
-  if (t.phrase) {
-    body = s.split(/\s+/).map(rxEsc).join("[\\s\\-–]+");
-  } else {
-    s = s.replace(/^[^\w*]+|[^\w*]+$/g, ""); if (!s) return null;
-    if (s.endsWith("*")) body = rxEsc(s.slice(0, -1)) + "[\\w\\-]*";
-    else body = rxEsc(s) + "(?:s|es)?";
-  }
-  const lead = /^\w/.test(s) ? "\\b" : "", tail = /[\w*]$/.test(s) || t.phrase ? "\\b" : "";
-  return new RegExp(lead + "(?:" + body + ")" + tail, "gi");
-}
-function countRx(rx, s, cap = 300) { if (!s) return 0; rx.lastIndex = 0; let n = 0; while (rx.exec(s)) { if (++n >= cap) break; if (rx.lastIndex === 0) break; } return n; }
-
-// ---------- search
 function filtersPass(p) {
   const v = id => $(id).value;
   const cand = v("#f-cand"), uni = v("#f-uni");
@@ -361,63 +356,197 @@ function filtersPass(p) {
   if ($("#f-rev").checked && !p._review) return false;
   return true;
 }
-function fieldsFor(p, t, scope, useAbs) {
-  const txt = LIB.text[p.id] || "";
-  const f = t.field || (scope === "all" ? "" : scope === "authors" ? "author" : scope);
-  if (f === "title") return [p.title];
-  if (f === "author") return [p._authors];
-  if (f === "text") return [txt || (useAbs ? p.abstract : "")];
-  return [p.title, p._authors, txt || (useAbs ? p.abstract : "")];
+
+// ---------- query parsing (same syntax as before)
+function fold(s) { return s.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase(); }
+function words(s) { return (fold(s).match(/[a-z0-9]+/g) || []).filter(w => w.length >= 2 && w.length <= 30 && !STOP.has(w) && !(/^\d+$/.test(w) && w.length > 4)); }
+function parseQuery(q) {
+  const toks = []; const re = /(-|NOT\s+)?(?:(title|author|authors|text):)?("([^"]*)"|(\S+))/g; let m;
+  while ((m = re.exec(q))) {
+    const raw = m[4] ?? m[5];
+    if (!m[1] && !m[2] && m[4] === undefined && (raw === "AND" || raw === "OR")) { toks.push({ op: raw }); continue; }
+    if (!raw || !raw.trim()) continue;
+    let phrase = m[4] !== undefined;
+    const r = raw.trim();
+    // a plain term like "risc-v" or "gpt-4" is matched as a phrase of its parts
+    if (!phrase && !r.endsWith("*") && (fold(r).match(/[a-z0-9]+/g) || []).length > 1) phrase = true;
+    toks.push({ neg: !!m[1], field: (m[2] || "").replace("authors", "author"), phrase, raw: r });
+  }
+  const groups = [[]], neg = [], ignored = [];
+  for (const t of toks) {
+    if (t.op === "OR") { if (groups[groups.length - 1].length) groups.push([]); continue; }
+    if (t.op === "AND") continue;
+    t.rx = termRx(t); if (!t.rx) continue;
+    t.prefix = !t.phrase && t.raw.endsWith("*");
+    t.words = t.prefix ? [fold(t.raw.replace(/\*+$/, "")).replace(/[^a-z0-9]/g, "")] : words(t.raw);
+    if (!t.words.length || (t.prefix && t.words[0].length < 2)) { ignored.push(t.raw); continue; }
+    (t.neg ? neg : groups[groups.length - 1]).push(t);
+  }
+  return { groups: groups.filter(g => g.length), neg, ignored };
 }
-function runSearch(reset) {
+function rxEsc(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function termRx(t) {
+  let s = t.raw.trim(); if (!s) return null;
+  let body;
+  if (t.phrase) body = s.split(/[\s\-–]+/).filter(Boolean).map(rxEsc).join("[\\s\\-–]+");
+  else {
+    s = s.replace(/^[^\w*]+|[^\w*]+$/g, ""); if (!s) return null;
+    body = s.endsWith("*") ? rxEsc(s.slice(0, -1)) + "[\\w\\-]*" : rxEsc(s) + "(?:s|es)?";
+  }
+  const lead = /^\w/.test(s) ? "\\b" : "", tail = /[\w*]$/.test(s) || t.phrase ? "\\b" : "";
+  return new RegExp(lead + "(?:" + body + ")" + tail, "gi");
+}
+
+// ---------- index lookups
+function decode(key, str) {
+  if (LIB.dec.has(key)) return LIB.dec.get(key);
+  const m = new Map(); let n = 0;
+  for (const e of str.split(",")) { const [d, c] = e.split(":"); n += parseInt(d, 36); m.set(n, c ? parseInt(c, 36) : 1); }
+  LIB.dec.set(key, m); return m;
+}
+function fieldsFor(t, scope, useAbs) {
+  const f = t.field || (scope === "all" ? "" : scope === "authors" ? "author" : scope);
+  if (f === "title") return ["t~"];
+  if (f === "author") return ["a~"];
+  if (f === "text") return useAbs ? ["", "b~"] : [""];
+  return useAbs ? ["", "t~", "a~", "b~"] : ["", "t~", "a~"];
+}
+async function wordMap(w, prefix, fields, exactForm) {
+  const sh = await loadShard(w.slice(0, 2));
+  const out = new Map(); const inTitle = new Set(), inAuth = new Set();
+  const forms = prefix ? null : exactForm ? [w] : [w, w + "s", w + "es"];
+  for (const f of fields) {
+    const keys = prefix ? Object.keys(sh).filter(k => k.startsWith(f + w) && (f || !k.includes("~"))) : forms.map(x => f + x).filter(k => k in sh);
+    for (const k of keys) for (const [n, c] of decode(k, sh[k])) {
+      out.set(n, (out.get(n) || 0) + c);
+      if (f === "t~") inTitle.add(n); if (f === "a~") inAuth.add(n);
+    }
+  }
+  return { map: out, inTitle, inAuth };
+}
+async function termMap(t, scope, useAbs) {
+  const fields = fieldsFor(t, scope, useAbs);
+  if (!t.phrase) return wordMap(t.words[0], t.prefix, fields, false);
+  // phrase: publications containing every word; confirmed against the text later
+  let acc = null, inTitle = null, inAuth = null;
+  for (const w of t.words) {
+    const r = await wordMap(w, false, fields, true);
+    if (!acc) { acc = r.map; inTitle = r.inTitle; inAuth = r.inAuth; continue; }
+    const next = new Map(); for (const [n, c] of acc) if (r.map.has(n)) next.set(n, Math.min(c, r.map.get(n)));
+    acc = next; inTitle = new Set([...inTitle].filter(n => r.inTitle.has(n))); inAuth = new Set([...inAuth].filter(n => r.inAuth.has(n)));
+  }
+  return { map: acc || new Map(), inTitle: inTitle || new Set(), inAuth: inAuth || new Set() };
+}
+
+// ---------- search
+async function runSearch(reset) {
   if (!LIB.pubs.length) return;
+  const token = ++state.token;
   const q = $("#q").value.trim(), scope = $("#f-scope").value, useAbs = $("#f-abs").checked;
   const pq = parseQuery(q); state.pq = pq;
   state.terms = pq.groups.flat();
-  const out = [];
-  for (const p of LIB.pubs) {
-    if (!filtersPass(p)) continue;
-    if (!pq.groups.length) { if (!pq.neg.length || !pq.neg.some(t => fieldsFor(p, t, scope, useAbs).some(s => countRx(t.rx, s, 1)))) out.push({ p, score: 0, hits: {} }); continue; }
-    if (pq.neg.some(t => fieldsFor(p, t, scope, useAbs).some(s => countRx(t.rx, s, 1)))) continue;
-    let best = -1, bestHits = null;
+  state.note = pq.ignored.length ? `Ignored common or too-short words: ${pq.ignored.map(esc).join(", ")}.` : "";
+  let out = [];
+  if (!pq.groups.length && !pq.neg.length) {
+    out = LIB.pubs.filter(filtersPass).map(p => ({ p, score: 0, hits: {} }));
+  } else {
+    $("#count").textContent = "Searching…";
+    const maps = new Map();
+    for (const t of [...pq.groups.flat(), ...pq.neg]) maps.set(t, await termMap(t, scope, useAbs));
+    if (token !== state.token) return;
+    const best = new Map();
+    const universe = pq.groups.length ? null : LIB.pubs.map(p => p.num);
+    if (universe) for (const n of universe) best.set(n, { score: 0, hits: {} });
     for (const g of pq.groups) {
-      let ok = true, score = 0; const hits = {};
-      for (const t of g) {
-        const fs = fieldsFor(p, t, scope, useAbs);
-        let n = 0; fs.forEach((s, i) => { const c = countRx(t.rx, s); n += c; if (c && s === p.title) score += 25; if (c && s === p._authors) score += 10; });
-        if (!n) { ok = false; break; }
-        hits[t.raw] = n; score += Math.log2(1 + n) * 4;
+      let cand = null;
+      for (const t of g) { const m = maps.get(t).map; cand = cand ? cand.filter(n => m.has(n)) : [...m.keys()]; }
+      for (const n of cand || []) {
+        let score = 0; const hits = {};
+        for (const t of g) { const r = maps.get(t), c = r.map.get(n); hits[t.raw] = c; score += Math.log2(1 + c) * 4 + (r.inTitle.has(n) ? 25 : 0) + (r.inAuth.has(n) ? 10 : 0); }
+        const prev = best.get(n); if (!prev || score > prev.score) best.set(n, { score, hits, group: g });
       }
-      if (ok && score > best) { best = score; bestHits = hits; }
     }
-    if (best >= 0) out.push({ p, score: best + (p.has_fulltext ? 1 : 0), hits: bestHits, absOnly: !LIB.text[p.id] });
+    for (const t of pq.neg) if (!t.phrase) for (const n of maps.get(t).map.keys()) best.delete(n);
+    for (const [n, v] of best) {
+      const p = LIB.byNum.get(n); if (!p || !filtersPass(p)) continue;
+      const verify = (v.group || []).some(t => t.phrase) || pq.neg.some(t => t.phrase);
+      out.push({ p, score: v.score + (p.has_fulltext ? 1 : 0), hits: v.hits, group: v.group || [], verify, absOnly: !p.has_fulltext });
+    }
   }
   const s = $("#sort").value;
   const cmp = { rel: (a, b) => b.score - a.score || (+b.p.year || 0) - (+a.p.year || 0), new: (a, b) => (+b.p.year || 0) - (+a.p.year || 0),
-    old: (a, b) => (+a.p.year || 9999) - (+b.p.year || 9999), title: (a, b) => a.p.title.localeCompare(b.p.title), len: (a, b) => b.p.chars - a.p.chars }[s];
+    old: (a, b) => (+a.p.year || 9999) - (+b.p.year || 9999), title: (a, b) => a.p.title.localeCompare(b.p.title), len: (a, b) => b.p.words - a.p.words }[s];
   out.sort(cmp);
-  state.results = out; if (reset !== false) state.shown = 0;
-  state.shown = Math.max(state.shown, state.page);
-  renderResults();
+  state.results = out; if (reset !== false) state.shown = state.page;
   if (reset) setHash();
+  await showPage(token);
+  if (out.some(r => r.verify)) verifyAll(token);
+}
+// phrase check against the actual words of a paper (text, title, authors or abstract as the search scope allows)
+async function verifies(r) {
+  const p = r.p, scope = $("#f-scope").value, useAbs = $("#f-abs").checked;
+  const need = r.group.filter(t => t.phrase), negs = (state.pq?.neg || []).filter(t => t.phrase);
+  if (!need.length && !negs.length) return true;
+  const text = await loadText(p);
+  if (text === null) return true;  // could not load the text: keep the result rather than drop a possible match
+  let abstract = "";
+  if (useAbs && !p.has_fulltext && p.has_abstract) abstract = (await loadDetail(p)).abstract || "";
+  let authors = null;
+  const hay = async t => {
+    const f = t.field || (scope === "all" ? "" : scope === "authors" ? "author" : scope);
+    if (f === "title") return [p.title];
+    if (f === "author") { authors ??= ((await loadDetail(p)).authors || []).join("; "); return [authors]; }
+    if (f === "text") return [text || abstract];
+    authors ??= ((await loadDetail(p)).authors || []).join("; ");
+    return [p.title, authors, text || abstract];
+  };
+  for (const t of need) {
+    const hs = await hay(t); let c = 0;
+    for (const h of hs) { const rx = new RegExp(t.rx.source, "gi"); c += (h.match(rx) || []).length; }
+    if (!c) return false; r.hits[t.raw] = c;
+  }
+  for (const t of negs) { const hs = await hay(t); if (hs.some(h => new RegExp(t.rx.source, "i").test(h))) return false; }
+  return true;
+}
+async function showPage(token) {
+  renderResults();
+  const vis = state.results.slice(0, state.shown);
+  await pool(vis, 8, async r => {
+    if (r.verify && r.ok === undefined) r.ok = await verifies(r);
+    else if (r.p.has_fulltext) await loadText(r.p);
+  });
+  if (token !== state.token) return;
+  const before = state.results.length;
+  state.results = state.results.filter(r => r.ok !== false);
+  if (state.results.length < before && state.shown > state.results.length) state.shown = Math.max(state.page, state.results.length);
+  renderResults();
+}
+async function verifyAll(token) {
+  const todo = state.results.filter(r => r.verify && r.ok === undefined);
+  state.verifying = todo.length;
+  for (let i = 0; i < todo.length; i += 24) {
+    await pool(todo.slice(i, i + 24), 8, async r => { r.ok = await verifies(r); });
+    if (token !== state.token) return;
+    state.verifying = todo.length - Math.min(todo.length, i + 24);
+    state.results = state.results.filter(r => r.ok !== false);
+    renderResults();
+  }
 }
 function snippetsFor(p, n = 2) {
-  const txt = LIB.text[p.id];
-  const src = txt || ($("#f-abs").checked ? p.abstract : "");
+  const src = cachedText(p);
   if (!src || !state.terms.length) return [];
   const out = []; const used = [];
-  // prefer matches in the paper body (after the first section heading) over the title/author header
-  const hm = txt ? src.search(/\n#{2,4} /) : -1; const bodyStart = hm > 0 ? hm : 0;
+  const hm = src.search(/\n#{2,4} /); const bodyStart = hm > 0 ? hm : 0;
   for (const t of state.terms) {
     if (t.field === "title" || t.field === "author") continue;
-    t.rx.lastIndex = bodyStart; let m = t.rx.exec(src);
-    if (!m) { t.rx.lastIndex = 0; m = t.rx.exec(src); }
-    if (!m) continue;
-    if (used.some(u => Math.abs(u - m.index) < 300)) continue;
+    const rx = new RegExp(t.rx.source, "gi");
+    rx.lastIndex = bodyStart; let m = rx.exec(src);
+    if (!m) { rx.lastIndex = 0; m = rx.exec(src); }
+    if (!m || used.some(u => Math.abs(u - m.index) < 300)) continue;
     used.push(m.index);
     const a = Math.max(0, m.index - 170), b = Math.min(src.length, m.index + m[0].length + 170);
-    const before = src.slice(0, m.index); const pm = before.match(/<!-- Page (\d+) -->(?![\s\S]*<!-- Page)/);
-    let sn = src.slice(a, b).replace(/<!-- Page \d+ -->/g, " ").replace(/^#+\s*/gm, "").replace(/\*\*/g, "").replace(/\|/g, " ").replace(/\s+/g, " ");
+    const pm = src.slice(0, m.index).match(/<!-- Page (\d+) -->(?![\s\S]*<!-- Page)/);
+    const sn = src.slice(a, b).replace(/<!-- Page \d+ -->/g, " ").replace(/^#+\s*/gm, "").replace(/\*\*/g, "").replace(/\|/g, " ").replace(/\s+/g, " ");
     out.push({ html: (a > 0 ? "… " : "") + hl(sn) + (b < src.length ? " …" : ""), page: pm ? pm[1] : null });
     if (out.length >= n) break;
   }
@@ -425,37 +554,44 @@ function snippetsFor(p, n = 2) {
 }
 function hl(s) {
   let h = esc(s);
-  for (const t of state.terms) { if (t.field === "title" || t.field === "author") continue; const rx = new RegExp(t.rx.source, "gi"); h = h.replace(rx, m => `<mark>${m}</mark>`); }
+  for (const t of state.terms) { if (t.field === "title" || t.field === "author") continue; h = h.replace(new RegExp(t.rx.source, "gi"), m => `<mark>${m}</mark>`); }
   return h;
 }
 function hlPlain(s, kind) {
   let h = esc(s);
-  for (const t of state.terms) { if (t.field && t.field !== kind) continue; const rx = new RegExp(t.rx.source, "gi"); h = h.replace(rx, m => `<mark>${m}</mark>`); }
+  for (const t of state.terms) { if (t.field && t.field !== kind) continue; h = h.replace(new RegExp(t.rx.source, "gi"), m => `<mark>${m}</mark>`); }
   return h;
 }
 function badge(st) { return `<span class="b ${esc(st)}">${esc(st)}</span>`; }
 function renderResults() {
   const r = state.results, list = $("#list");
   const q = $("#q").value.trim();
-  const loading = LIB.loaded < LIB.index.shards.length ? ` · loading full text ${LIB.loaded}/${LIB.index.shards.length}` : "";
-  $("#count").innerHTML = `<b>${r.length.toLocaleString()}</b> publication${r.length === 1 ? "" : "s"}${q ? " match" : ""}${loading}`;
+  const checking = state.verifying ? ` · confirming exact phrases, ${state.verifying.toLocaleString()} left` : "";
+  $("#count").innerHTML = `<b>${r.length.toLocaleString()}</b> publication${r.length === 1 ? "" : "s"}${q ? " match" : ""}${checking}${state.note ? ` · <span>${state.note}</span>` : ""}`;
   if (!r.length) { list.innerHTML = `<div class="empty">No publications match. Try fewer words, OR, or a prefix like <code>optimiz*</code>.</div>`; $("#showmore").hidden = true; return; }
   list.innerHTML = r.slice(0, state.shown).map(({ p, hits, absOnly }) => {
     const who = p.candidates.map(id => { const c = LIB.candById[id]; return `<span class="who"><a data-cand="${esc(id)}">${esc(c?.name || id)}</a> · ${esc(c?.university || "")}</span>`; }).join(" ");
     const sn = snippetsFor(p).map(s => `<div class="snip">${s.page ? `<span class="pg">p.${s.page}</span>` : ""}${s.html}</div>`).join("");
-    const hitTxt = hits && Object.keys(hits).length ? `<div class="hits">Matches: ${Object.entries(hits).map(([k, v]) => `${esc(k)} ×${v >= 300 ? "300+" : v}`).join(" · ")}${absOnly && q ? " · <b>abstract only, no full text</b>" : ""}</div>` : "";
+    const loading = p.has_fulltext && q && !cachedText(p) ? `<div class="hits">Loading excerpt…</div>` : "";
+    const hitTxt = hits && Object.keys(hits).length ? `<div class="hits">Matches: ${Object.entries(hits).map(([k, v]) => `${esc(k)} ×${v}`).join(" · ")}${absOnly && q ? " · <b>no full text: matched title, authors or abstract</b>" : ""}</div>` : "";
     return `<div class="card">
       <h3><a data-open="${p.id}">${hlPlain(p.title, "title")}</a></h3>
       <div class="meta">${who}<span>${esc(p.year || "n.d.")}</span>${p.venue ? `<span>${esc(p.venue)}</span>` : ""}</div>
       <div class="badges">${badge(p.status)}<span class="b topic">${p.has_fulltext ? `Full text · ${(p.words || 0).toLocaleString()} words${p.pages ? ` · ${p.pages} pp` : ""}` : "No full text"}</span>${p.topics.map(t => `<span class="b topic">${esc(t)}</span>`).join("")}${p._review ? `<span class="b review">Attribution review</span>` : ""}</div>
-      ${sn}${hitTxt}</div>`;
+      ${sn}${loading}${hitTxt}</div>`;
   }).join("");
   $("#showmore").hidden = state.shown >= r.length;
+  // excerpts for visible cards whose text is not in memory (e.g. pushed out of the cache): load, then redraw once
+  const missing = r.slice(0, state.shown).filter(x => x.p.has_fulltext && q && !cachedText(x.p) && !LIB.text.has(x.p.id));
+  if (missing.length && !state.refilling) {
+    state.refilling = true; const tok = state.token;
+    pool(missing, 8, x => loadText(x.p)).then(() => { state.refilling = false; if (tok === state.token) renderResults(); });
+  }
 }
-$("#showmore").addEventListener("click", () => { state.shown += state.page; renderResults(); });
+$("#showmore").addEventListener("click", () => { state.shown += state.page; showPage(state.token); });
 $("#form").addEventListener("submit", e => { e.preventDefault(); runSearch(true); });
 document.addEventListener("click", e => {
-  const o = e.target.closest("[data-open]"); if (o) { e.preventDefault(); openPub(o.dataset.open, o.dataset.rec); return; }
+  const o = e.target.closest("[data-open]"); if (o) { e.preventDefault(); openPub(o.dataset.open); return; }
   const c = e.target.closest("[data-cand]"); if (c) { e.preventDefault(); showTab("search"); $("#f-cand").value = c.dataset.cand; runSearch(true); window.scrollTo(0, 0); }
 });
 
@@ -465,8 +601,7 @@ function mdToHtml(md) {
   const L = md.split("\n"); const out = []; let para = [];
   const flush = () => { if (para.length) { out.push(`<p>${inline(para.join(" "))}</p>`); para = []; } };
   for (let i = 0; i < L.length; i++) {
-    const l = L[i];
-    let m;
+    const l = L[i]; let m;
     if ((m = l.match(/^<!-- Page (\d+) -->$/))) { flush(); out.push(`<div class="pm" id="pg-${m[1]}">Page ${m[1]}</div>`); continue; }
     if (!l.trim()) { flush(); continue; }
     if ((m = l.match(/^(#{1,4})\s+(.*)$/))) { flush(); const n = m[1].length; out.push(`<h${n}>${inline(m[2])}</h${n}>`); continue; }
@@ -503,49 +638,47 @@ function highlightDom(root) {
   }
   return found;
 }
-function openPub(pid, recKey) {
-  const p = LIB.pubById[pid]; if (!p) return;
-  const recs = LIB.recsByPub[pid] || [];
+async function openPub(id) {
+  const p = LIB.byNum.get(+String(id).slice(1)); if (!p) return;
   $("#vtitle").textContent = p.title;
-  const txt = LIB.text[p.id];
+  $("#paper").innerHTML = `<div class="notice">Loading…</div>`; $("#vside").innerHTML = "";
+  $("#viewer").hidden = false; document.body.style.overflow = "hidden";
+  if (HIST && location.hash !== "#pub=" + p.id) try { history.pushState(null, "", "#pub=" + p.id); } catch (e) {}
+  const [txt, d] = await Promise.all([loadText(p), loadDetail(p)]);
+  const recs = LIB.recsByPid[p.id] || [];
   let body = "";
-  if (txt) {
-    body = (p.status === "Partial" ? `<div class="notice">Partial archive: ${esc(p.status_reason)}</div>` : "") + mdToHtml(txt);
-  } else if (p.has_fulltext) {
-    body = `<div class="notice">Full text is still loading. Reopen in a moment.</div>`;
-  } else {
-    body = `<h1>${esc(p.title)}</h1><div class="unav"><b>Full text not available.</b><br>${esc(p.status_reason)}<br><br>No abstract or summary has been substituted for the paper text. Every source that was checked is listed on the right.</div>` +
-      (p.abstract ? `<h3>Abstract (metadata only, not full text)</h3><p>${esc(p.abstract)}</p>` : "");
-  }
+  if (txt) body = (p.status === "Partial" ? `<div class="notice">Partial archive: ${esc(d.status_reason)}</div>` : "") + mdToHtml(txt);
+  else body = `<h1>${esc(p.title)}</h1><div class="unav"><b>Full text not available.</b><br>${esc(d.status_reason)}<br><br>No abstract or summary has been substituted for the paper text. Every source that was checked is listed on the right.</div>` +
+    (d.abstract ? `<h3>Abstract (metadata only, not full text)</h3><p>${esc(d.abstract)}</p>` : "");
   $("#paper").innerHTML = body;
-  const cl = recs.map(r => `<li><a data-cand="${esc(r.cid)}" href="#">${esc(r.name)}</a> (${esc(r.cid)}, ${esc(r.university)})<br><span class="b ${esc(r.status)}">${esc(r.status)}</span> ${esc(r.record_key)}${r.duplicate_of ? ` · duplicate of ${esc(r.duplicate_of)}` : ""}<br><span style="color:var(--muted)">${esc(r.attribution)}</span>${r.printed_name ? `<br>Printed as: ${esc(r.printed_name)}` : ""}${r.affiliation_on_work ? `<br>Affiliation on work: ${esc(r.affiliation_on_work)}` : ""}${LOCAL ? `<br><a href="${encodeURI(r.file)}" target="_blank" rel="noopener">Open archive file (.md)</a>` : ""}</li>`).join("");
+  const drec = Object.fromEntries((d.records || []).map(r => [r.record_key, r]));
+  const cl = recs.map(r => { const x = drec[r.record_key] || {};
+    return `<li><a data-cand="${esc(r.cid)}" href="#">${esc(r.name)}</a> (${esc(r.cid)}, ${esc(r.university)})<br><span class="b ${esc(r.status)}">${esc(r.status)}</span> ${esc(r.record_key)}${x.duplicate_of ? ` · duplicate of ${esc(x.duplicate_of)}` : ""}<br><span style="color:var(--muted)">${esc(x.attribution || ATT[r.att[0]] || "")}</span>${x.printed_name ? `<br>Printed as: ${esc(x.printed_name)}` : ""}${x.affiliation_on_work ? `<br>Affiliation on work: ${esc(x.affiliation_on_work)}` : ""}${LOCAL && x.file ? `<br><a href="${encodeURI(x.file)}" target="_blank" rel="noopener">Open archive file (.md)</a>` : ""}</li>`; }).join("");
   const dl = (k, v) => v ? `<dt>${k}</dt><dd>${v}</dd>` : "";
   const link = u => u ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u)}</a>` : "";
   $("#vside").innerHTML = `
-    <div class="box"><h4>Status</h4>${badge(p.status)} ${p.has_fulltext ? `<span class="b topic">${(p.words || 0).toLocaleString()} words · ${(p.chars || 0).toLocaleString()} chars</span>` : ""}
-      ${p.status_reason ? `<p style="margin:8px 0 0">${esc(p.status_reason)}</p>` : ""}${p.choice_reason ? `<p style="margin:6px 0 0;color:var(--muted)">${esc(p.choice_reason)}</p>` : ""}</div>
+    <div class="box"><h4>Status</h4>${badge(p.status)} ${p.has_fulltext ? `<span class="b topic">${(p.words || 0).toLocaleString()} words · ${(d.chars || 0).toLocaleString()} chars</span>` : ""}
+      ${d.status_reason ? `<p style="margin:8px 0 0">${esc(d.status_reason)}</p>` : ""}${d.choice_reason ? `<p style="margin:6px 0 0;color:var(--muted)">${esc(d.choice_reason)}</p>` : ""}</div>
     <div class="box"><h4>Candidates</h4><ul class="att" style="padding-left:16px;margin:0">${cl}</ul></div>
     <div class="box"><h4>Publication</h4><dl>
-      ${dl("Authors", esc(p.authors.join("; ")) + ` <span style="color:var(--muted)">(${esc(p.authors_source)})</span>`)}
-      ${dl("Affiliations", esc((p.affiliations || []).join("; ")))}
-      ${dl("Year / date", esc(p.date || p.year))}${dl("Venue", esc(p.venue))}${dl("Type", esc(p.type))}
-      ${dl("DOI", p.doi ? link("https://doi.org/" + p.doi) : "")}${dl("OpenAlex", link(p.openalex_url))}
-      ${dl("arXiv", p.arxiv_id ? link("https://arxiv.org/abs/" + p.arxiv_id) : "")}
-      ${dl("Original URL", link(p.original_url))}${dl("Full-text source", link(p.fulltext_url))}
-      ${dl("Source type", esc(p.source_type))}${dl("Extraction", esc(p.method))}${dl("PDF pages", esc(p.pages))}
-      ${dl("Topics (full text)", esc(p.topics.join("; ")) + (p.topics.length ? "<br><span style='color:var(--muted);font-size:12px'>" + p.topics.map(t => esc(t + ": " + p.topic_basis[t])).join("<br>") + "</span>" : ""))}
+      ${dl("Authors", esc((d.authors || []).join("; ")) + ` <span style="color:var(--muted)">(${esc(d.authors_source)})</span>`)}
+      ${dl("Affiliations", esc((d.affiliations || []).join("; ")))}
+      ${dl("Year / date", esc(d.date || p.year))}${dl("Venue", esc(p.venue))}${dl("Type", esc(p.type))}
+      ${dl("DOI", d.doi ? link("https://doi.org/" + d.doi) : "")}${dl("OpenAlex", link(d.openalex_url))}
+      ${dl("arXiv", d.arxiv_id ? link("https://arxiv.org/abs/" + d.arxiv_id) : "")}
+      ${dl("Original URL", link(d.original_url))}${dl("Full-text source", link(d.fulltext_url))}
+      ${dl("Source type", esc(d.source_type))}${dl("Extraction", esc(d.method))}${dl("PDF pages", esc(p.pages || ""))}
+      ${dl("Topics (full text)", esc(p.topics.join("; ")) + (p.topics.length ? "<br><span style='color:var(--muted);font-size:12px'>" + p.topics.map(t => esc(t + ": " + (d.topic_basis || {})[t])).join("<br>") + "</span>" : ""))}
       ${dl("Possible topics (review)", esc(p.topics_possible.join("; ")))}
-      ${dl("OpenAlex topics", esc((p.openalex_topics || []).join("; ")))}
-      ${dl("Flags", esc((p.flags || []).join("; ")))}
+      ${dl("OpenAlex topics", esc((d.openalex_topics || []).join("; ")))}
+      ${dl("Flags", esc((d.flags || []).join("; ")))}
     </dl></div>
-    <div class="box"><h4>Sources checked (${p.attempts.length})</h4><ol class="att" style="padding-left:18px;margin:0">${p.attempts.map(a => `<li>${esc(a.source)}: <b>${esc(a.result)}</b>${a.url ? `<br>${link(a.url)}` : ""}</li>`).join("")}</ol></div>`;
+    <div class="box"><h4>Sources checked (${(d.attempts || []).length})</h4><ol class="att" style="padding-left:18px;margin:0">${(d.attempts || []).map(a => `<li>${esc(a[0])}: <b>${esc(a[2])}</b>${a[1] ? `<br>${link(a[1])}` : ""}</li>`).join("")}</ol></div>`;
   marks = highlightDom($("#paper")); cur = -1;
   $("#vhits").textContent = marks.length ? `${marks.length} match${marks.length === 1 ? "" : "es"}` : "";
   $("#vprev").hidden = $("#vnext").hidden = !marks.length;
-  $("#viewer").hidden = false; document.body.style.overflow = "hidden";
   $("#vbody").scrollTop = 0;
   if (marks.length) step(1);
-  if (HIST && location.hash !== "#pub=" + pid) try { history.pushState(null, "", "#pub=" + pid); } catch (e) {}
 }
 function step(d) { if (!marks.length) return; if (cur >= 0) marks[cur].classList.remove("cur"); cur = (cur + d + marks.length) % marks.length; marks[cur].classList.add("cur"); marks[cur].scrollIntoView({ block: "center" }); $("#vhits").textContent = `${cur + 1} / ${marks.length} matches`; }
 $("#vnext").addEventListener("click", () => step(1));
@@ -558,7 +691,7 @@ document.addEventListener("keydown", e => { if ($("#viewer").hidden) return; if 
 function setHash() { if (!HIST) return; const q = $("#q").value.trim(); try { history.replaceState(null, "", q ? "#q=" + encodeURIComponent(q) : location.pathname); } catch (e) {} }
 function applyHash() {
   const h = location.hash;
-  if (h.startsWith("#q=")) { $("#q").value = decodeURIComponent(h.slice(3)); }
+  if (h.startsWith("#q=")) $("#q").value = decodeURIComponent(h.slice(3));
   runSearch(true);
   if (h.startsWith("#pub=")) openPub(h.slice(5));
 }
@@ -579,9 +712,11 @@ function renderCands() {
   const cols = [["id", "ID"], ["name", "Candidate"], ["university", "University"], ["records", "Records", 1], ["unique", "Unique", 1], ["complete", "Complete", 1], ["partial", "Partial", 1], ["unavailable", "Unavailable", 1], ["duplicates", "Duplicates", 1], ["review", "Review", 1], ["overall", "Overall status"]];
   let rows = LIB.cands.filter(c => !f || (c.name + " " + c.id + " " + c.university).toLowerCase().includes(f));
   rows.sort((a, b) => { const x = a[csort.k], y = b[csort.k]; return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * csort.d || a.id.localeCompare(b.id); });
-  $("#ccount").textContent = `${rows.length} candidates`;
+  $("#ccount").textContent = `${rows.length.toLocaleString()} candidates`;
+  const shown = rows.slice(0, 500);
   $("#ctable").innerHTML = `<thead><tr>${cols.map(([k, t]) => `<th data-k="${k}">${t}${csort.k === k ? (csort.d > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr></thead><tbody>` +
-    rows.map(c => `<tr class="clk" data-cid="${esc(c.id)}">${cols.map(([k, , n]) => `<td class="${n ? "n" : ""}">${esc(c[k])}</td>`).join("")}</tr>`).join("") + "</tbody>";
+    shown.map(c => `<tr class="clk" data-cid="${esc(c.id)}">${cols.map(([k, , n]) => `<td class="${n ? "n" : ""}">${esc(c[k])}</td>`).join("")}</tr>`).join("") + "</tbody>" +
+    (rows.length > shown.length ? `<tfoot><tr><td colspan="${cols.length}" style="color:var(--muted)">Showing the first 500. Type in the filter box to find someone.</td></tr></tfoot>` : "");
 }
 $("#cfilter").addEventListener("input", renderCands);
 $("#ctable").addEventListener("click", e => {
@@ -591,11 +726,11 @@ $("#ctable").addEventListener("click", e => {
 function showCand(cid) {
   const c = LIB.candById[cid]; const recs = LIB.recs.filter(r => r.cid === cid);
   $("#cdetail").innerHTML = `<div class="card"><h3>${esc(c.name)} <span style="color:var(--muted);font-weight:400">(${esc(c.id)})</span></h3>
-    <div class="meta"><span>${esc(c.university)}</span><span>${esc(c.degree)}</span><span>${esc(c.program)}</span><span>Match: ${esc(c.match_status)}</span>
+    <div class="meta"><span>${esc(c.university)}</span><span>${esc(c.degree)}</span><span>${esc(c.program)}</span><span>Match: ${esc(c.match_status)}</span>${c.batch ? `<span>Added in batch ${c.batch}</span>` : "<span>Pilot</span>"}
     ${c.openalex ? `<a href="${esc(c.openalex)}" target="_blank" rel="noopener noreferrer">OpenAlex profile</a>` : ""} ${c.scholar ? `<a href="${esc(c.scholar)}" target="_blank" rel="noopener noreferrer">Scholar profile</a>` : ""}</div>
-    <p class="meta">Folder: <code>${esc(c.folder)}</code> · ${c.records} records · ${c.complete} complete · ${c.partial} partial · ${c.unavailable} unavailable · ${c.duplicates} duplicates · ${c.review} flagged for review</p>
+    <p class="meta">${c.records} records · ${c.complete} complete · ${c.partial} partial · ${c.unavailable} unavailable · ${c.duplicates} duplicates · ${c.review} flagged for review</p>
     <div class="tablewrap"><table class="grid"><thead><tr><th>#</th><th>Title</th><th>Year</th><th>Status</th><th>Attribution</th></tr></thead><tbody>
-    ${recs.map(r => `<tr class="clk" data-open="${r.pid}"><td>${esc(r.record_key.split("-").pop())}</td><td>${esc(r.title)}</td><td>${esc(r.year)}</td><td>${badge(r.status)}</td><td style="font-size:12px;color:var(--muted)">${esc(r.attribution)}</td></tr>`).join("")}
+    ${recs.map(r => { const p = LIB.byNum.get(r.num) || {}; return `<tr class="clk" data-open="${r.pid}"><td>${esc(r.record_key.split("-").pop())}</td><td>${esc(p.title)}</td><td>${esc(p.year)}</td><td>${badge(r.status)}</td><td style="font-size:12px;color:var(--muted)">${esc(ATT[r.att[0]] || "")}${r.att.endsWith("!") ? " · review" : ""}</td></tr>`; }).join("")}
     </tbody></table></div><p><button class="btn" data-cand="${esc(cid)}">Search within this candidate's papers</button></p></div>`;
   $("#cdetail").scrollIntoView({ block: "start", behavior: "smooth" });
 }
@@ -603,22 +738,22 @@ function showCand(cid) {
 // ---------- about
 function renderAbout() {
   const c = LIB.index.counts;
+  const added = c.candidates - c.pilot_candidates;
   $("#about").innerHTML = `<h2>About this library</h2>
-  <p>Built ${esc(LIB.index.built.replace("T", " "))} from <code>${esc(LIB.index.source_file)}</code> (tabs <i>Researchers (Pilot)</i> and <i>Research Papers (Pilot)</i>). No candidates or publications were added beyond that spreadsheet.</p>
+  <p>Built ${esc(LIB.index.built.replace("T", " "))} from <code>${esc(LIB.index.source_file)}</code>. The first ${c.pilot_candidates} people are the Research Paper Content Pilot (tabs <i>Researchers (Pilot)</i> and <i>Research Papers (Pilot)</i>).${added > 0 ? ` The other ${added.toLocaleString()} were added in ${c.batches.length} batch${c.batches.length === 1 ? "" : "es"} of up to 200 from the <i>All OpenAlex Data</i> tab (verified OpenAlex profiles), with their papers taken from those profiles.` : ""}</p>
   <table class="grid" style="max-width:520px"><tbody>
-  <tr><td>Candidates</td><td class="n">${c.candidates}</td></tr><tr><td>Publication records (candidate × paper)</td><td class="n">${c.records.toLocaleString()}</td></tr>
+  <tr><td>Candidates</td><td class="n">${c.candidates.toLocaleString()}</td></tr><tr><td>Publication records (candidate × paper)</td><td class="n">${c.records.toLocaleString()}</td></tr>
   <tr><td>Unique publications</td><td class="n">${c.publications.toLocaleString()}</td></tr><tr><td>Complete full text</td><td class="n">${c.complete.toLocaleString()}</td></tr>
   <tr><td>Partial full text</td><td class="n">${c.partial.toLocaleString()}</td></tr><tr><td>Unavailable</td><td class="n">${c.unavailable.toLocaleString()}</td></tr>
   <tr><td>Duplicate records</td><td class="n">${c.duplicates.toLocaleString()}</td></tr></tbody></table>
   <h3>Status labels</h3><ul>
   <li><span class="b Complete">Complete</span> the correct paper was found and its full text extracted with no major issues.</li>
-  <li><span class="b Partial">Partial</span> only part of the paper, a scanned PDF, a supplement, or text with major extraction issues.</li>
+  <li><span class="b Partial">Partial</span> only part of the paper, a scanned PDF, a supplement, a very short item, or text with major extraction issues.</li>
   <li><span class="b Unavailable">Unavailable</span> no legitimate open full text (paywall, 403, bot check, abstract or metadata only).</li>
   <li><span class="b Duplicate">Duplicate</span> the same publication appears more than once for the same candidate; the text is stored once.</li></ul>
-  <h3>Search tips</h3><p>Search runs over the archived paper text, titles and author lists. Abstracts of papers without full text are excluded unless you tick the abstract option, and such results are labelled abstract only.
-  Topics come from term counts in the paper's full text (the evidence is shown in the reader); papers without full text have no topic.</p>
-  <p>Everything runs in this browser. The page loads only its own data files; links to DOIs and source pages only open when clicked.</p>
-  <p>Full methods, counts and gaps: <code>Reports/IMPORT_REPORT.md</code> and <code>Reports/Publications Archive Tracker.xlsx</code>.</p>`;
+  <h3>How search works</h3><p>Search uses a word index over the archived paper text, titles and author names, so only the parts of the index your words need are downloaded. Exact phrases are found through the index and then confirmed against each paper's text. Very common words (the, of, and…) are not indexed and are ignored in searches outside quotes.
+  Abstracts of papers without full text are searched only when you tick that option. Topics come from term counts in the paper's full text; papers without full text have no topic.</p>
+  <p>The page loads only its own data files; links to DOIs and source pages only open when clicked.</p>`;
 }
 
 // ---------- theme

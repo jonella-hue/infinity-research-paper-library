@@ -1,11 +1,7 @@
 # Infinity Research Paper Library
 
-Full-text search over the research papers of the 150 candidates in the Research Paper Content Pilot
-(Harvard, Princeton, UC Berkeley, Caltech, MIT, Stanford): 2,479 publication records, 2,355 unique papers,
-1,016 with archived full text (999 complete, 17 partial).
+Full-text search over the research papers of 1,150 candidates from Harvard, Princeton, UC Berkeley, Caltech, MIT and Stanford: 16,424 publication records, 15,294 unique papers, 6,234 with archived full text (6,091 complete).
 
-Open `index.html` (or the GitHub Pages link) and search the paper text, titles and authors.
-Supports `"exact phrase"`, `AND`, `OR`, `-exclude`, `prefix*`, `title:` and `author:`, plus filters.
+Candidates: the 150-person Research Paper Content Pilot, plus verified OpenAlex profiles from the All OpenAlex Data tab, added 200 people per batch.
 
-Built Nov 5, 2026 from `As of Nov 3_Research_Paper_Content_Pilot (...).xlsx`. Methods, counts and gaps are in
-the full library folder (`Reports/IMPORT_REPORT.md`, `Reports/Publications Archive Tracker.xlsx`).
+Open the GitHub Pages link and search paper text, titles and authors. Supports `"exact phrase"`, `AND`, `OR`, `-exclude`, `prefix*`, `title:` and `author:`, plus filters.
