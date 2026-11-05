@@ -1,6 +1,6 @@
 # Infinity Research Paper Library
 
-Full-text search over the research papers of 1,950 candidates from Harvard, Princeton, UC Berkeley, Caltech, MIT and Stanford: 22,986 publication records, 21,300 unique papers, 8,364 with archived full text (8,184 complete).
+Full-text search over the research papers of 2,150 candidates from Harvard, Princeton, UC Berkeley, Caltech, MIT and Stanford: 24,848 publication records, 23,077 unique papers, 9,104 with archived full text (8,902 complete).
 
 Candidates: the 150-person Research Paper Content Pilot, plus verified OpenAlex profiles from the All OpenAlex Data tab, added 200 people per batch.
 

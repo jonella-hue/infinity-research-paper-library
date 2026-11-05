@@ -245,7 +245,7 @@ const STOP = new Set(`a an and are as at be been but by can for from had has hav
 more not of on or our over she so such than that the their them then there these they this those to under up
 us was we were what when where which while who will with within would you your also using use used based between
 both each other only some`.split(/\s+/));
-const LIB = { index: null, cands: [], pubs: [], byNum: new Map(), recs: [], text: new Map(), detail: new Map(), shard: new Map(), dec: new Map() };
+const LIB = { index: null, cands: [], pubs: [], byNum: new Map(), recs: [], text: new Map(), tgroup: new Map(), detail: new Map(), shard: new Map(), dec: new Map() };
 const state = { results: [], shown: 0, terms: [], page: 30, token: 0, note: "" };
 const pid = n => "P" + String(n).padStart(4, "0");
 
@@ -292,14 +292,23 @@ async function boot() {
 }
 async function loadText(p) {  // "" = no full text; null = could not be loaded right now
   if (!p.has_fulltext) return "";
-  if (LIB.text.has(p.id)) return LIB.text.get(p.id);
-  const t = getJSON(`data/text/${p.id}.json`).then(d => d.t).catch(() => null);
-  LIB.text.set(p.id, t);
-  const v = await t;
-  if (v === null) { LIB.text.delete(p.id); return null; }
-  LIB.text.set(p.id, v);
-  if (LIB.text.size > 1500) LIB.text.delete(LIB.text.keys().next().value);  // keep memory bounded
-  return v;
+  const have = LIB.text.get(p.id); if (typeof have === "string") return have;
+  if (!LIB.index.text_group) {  // older data: one text file per paper
+    const v = await getJSON(`data/text/${p.id}.json`).then(d => d.t).catch(() => null);
+    if (v === null) return null;
+    LIB.text.set(p.id, v);
+    while (LIB.text.size > 2500) LIB.text.delete(LIB.text.keys().next().value);
+    return v;
+  }
+  const g = Math.floor((p.num - 1) / LIB.index.text_group) + 1;
+  if (!LIB.tgroup.has(g)) LIB.tgroup.set(g, getJSON(`data/text/t-${String(g).padStart(5, "0")}.json`).catch(() => null));
+  const docs = await LIB.tgroup.get(g);
+  if (!docs) { LIB.tgroup.delete(g); return null; }
+  for (const [id, t] of Object.entries(docs)) LIB.text.set(id, t);
+  LIB.tgroup.set(g, Promise.resolve({}));  // texts now live in LIB.text; keep only the marker
+  while (LIB.text.size > 2500) { const k = LIB.text.keys().next().value; LIB.text.delete(k); LIB.tgroup.delete(Math.floor((+k.slice(1) - 1) / (LIB.index.text_group || 1)) + 1); }
+  if (!LIB.text.has(p.id)) LIB.text.set(p.id, "");  // listed as having text but not in its file: don't retry forever
+  return LIB.text.get(p.id);
 }
 function cachedText(p) { const v = LIB.text.get(p.id); return typeof v === "string" ? v : ""; }
 async function loadDetail(p) {
@@ -586,7 +595,7 @@ function renderResults() {
   }).join("");
   $("#showmore").hidden = state.shown >= r.length;
   // excerpts for visible cards whose text is not in memory (e.g. pushed out of the cache): load, then redraw once
-  const missing = r.slice(0, state.shown).filter(x => x.p.has_fulltext && q && !cachedText(x.p) && !LIB.text.has(x.p.id));
+  const missing = r.slice(0, state.shown).filter(x => x.p.has_fulltext && q && !LIB.text.has(x.p.id));
   if (missing.length && !state.refilling) {
     state.refilling = true; const tok = state.token;
     pool(missing, 8, x => loadText(x.p)).then(() => { state.refilling = false; if (tok === state.token) renderResults(); });
